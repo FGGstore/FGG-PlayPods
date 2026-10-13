@@ -1,15 +1,26 @@
-# Offline message and packet checks
+# Offline validation
 
-Run `make check-offline` on Linux with GCC and AddressSanitizer/UndefinedBehaviorSanitizer. This target builds and runs only host fixtures with mocked Bluetooth transport. It needs no PS5 SDK or console.
+Run `make check-offline` on Linux with GCC, Python 3, AddressSanitizer and UndefinedBehaviorSanitizer. No PS5 SDK or console is required. The target runs the five accepted upstream bounds/capture/session-lock suites, followed by all 63 resident RFC test invocations. Console APIs, Bluetooth and USB operations are mocked; only host test executables run.
 
-The three fixtures exercise truncated HCI events and ACL messages, signaling echo and configuration extents, foreign handles, malformed SDP lengths, and packet capacity versus negotiated MTU. They also cover zero, negative and excessive send lengths.
+## Accepted bounds, capture and locking checks
 
-For compile-only target validation, set `PS5_PAYLOAD_SDK` to an extracted SDK and run `make fgg-playpods.elf BUILD=build/native`. Do not use `make test`: that is the upstream deployment target.
+The five suites cover truncated HCI events and ACL messages, signaling echo/configuration extents, foreign handles, malformed SDP lengths, packet capacity versus negotiated MTU, null/invalid capture boundaries and separate cleanup failures. File-lock contention and process lifetime use real Linux fixtures. The Bluetooth fixture uses designated channel initializers and mocks the RFC's additional output-idle/reporting interfaces; its original bounds assertions remain intact.
 
-These checks establish local bounds handling, not headset interoperability, native API behavior, shared Bluetooth-controller safety or audio quality. Timing, completion policy, native capture parameters and receive scheduling are unchanged in this patch.
+The accepted capture parameters, capture error reporting and descriptor-lock implementation are unchanged by this integration. A descriptor lock does not coordinate with older timestamp-lock builds. Linux locking and SDK linkage do not prove PS5 flock semantics or native cleanup/restoration.
 
-## Session and capture boundaries
+## Resident RFC checks
 
-The five-suite `check-offline` target additionally runs real Linux file-lock contention checks and mocked capture API tests. It covers duplicate launches, lock-open/acquire/release errors, null or invalid capture boundaries and failures at stop/close/terminate. Resource handles are consumed before cleanup so each is attempted once; secondary cleanup failures remain separately reported.
+The 63 invocations cover signaling transactions/collisions, authentication boundaries, ownership, terminal faults, startup guidance, one-reconnect gates, main lifecycle, output-idle handling, both receive-rearm policies, completion accounting, active mode and continuous streaming beyond ten simulated minutes. Detailed results and source hashes are written to `build/resident-offline/`.
 
-A descriptor lock lasts for the process lifetime. It does not coordinate with older timestamp-lock builds. Linux flock behavior and successful SDK compilation do not establish PS5 filesystem flock semantics. Native capture ABI, cleanup success, wireless input, and long-running audio require console validation; restarting capture after a failed native cleanup is outside these tests.
+The RFC changes Bluetooth transport/lifecycle behavior relative to upstream; see [the RFC](docs/RESIDENT-AUDIO-RFC.md) and [hardware summary](docs/hardware-summary.json). These mocks cannot establish radio interoperability, physical buffer availability, native-driver noninterference, audible quality or wireless controller safety.
+
+## Compile only
+
+With an extracted SDK and matching LLVM tools, run:
+
+```sh
+LLVM_CONFIG=llvm-config-18 make fgg-playpods.elf \
+  BUILD=build/native-rfc PS5_PAYLOAD_SDK=/path/to/ps5-payload-sdk
+```
+
+Do not use `make test`: that is the inherited deployment target. No payload execution or console contact is part of these checks.

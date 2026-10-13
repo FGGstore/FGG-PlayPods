@@ -1,5 +1,6 @@
 #include "a2dp.h"
 #include "bt.h"
+#include "hci.h"
 #include "capture.h"
 #include "log.h"
 #include "sbc.h"
@@ -16,6 +17,7 @@
 /* AVDTP signals. */
 #define AVDTP_DISCOVER          0x01
 #define AVDTP_GET_CAPABILITIES  0x02
+#define AVDTP_GET_ALL_CAPABILITIES 0x0C
 #define AVDTP_SET_CONFIGURATION 0x03
 #define AVDTP_OPEN              0x06
 #define AVDTP_START             0x07
@@ -35,6 +37,8 @@
 
 #define RETRY_MS        500     /* capture restart attempts */
 #define STATUS_MS       5000    /* status line interval */
+#define DISCOVER_FIRST_WAIT_MS 10000 /* isolated startup comparison only */
+#define CAPTURE_DRAIN_RECORDS 4 /* ~85 ms at 1024 frames/record, 48 kHz */
 
 typedef struct {
     int rate;
@@ -42,15 +46,18 @@ typedef struct {
     int sbc_freq, sbc_mode, sbc_blocks, sbc_subbands, sbc_alloc, bitpool;
 } sbc_choice;
 
-static l2cap_chan g_sig = { "signaling", SIG_CID, 0, 0, 0, 0, 0, 0, 672 };
-static l2cap_chan g_media = { "media", MEDIA_CID, 0, 0, 0, 0, 0, 0, 672 };
+static l2cap_chan g_sig = { .name="signaling", .scid=SIG_CID, .remote_mtu=672 };
+static l2cap_chan g_media = { .name="media", .scid=MEDIA_CID, .remote_mtu=672 };
 
 static unsigned char g_av_label;
 static int g_av_ready;
 static unsigned char g_av_rsp[256];
 static int g_av_len;
+static unsigned g_av_rx_count;
+static unsigned char g_av_expected_signal;
 
 static int g_sink_seid;
+static int g_source_in_use;
 static unsigned char g_sink_sbc[4];
 static sbc_choice g_sc;
 
@@ -63,25 +70,75 @@ static int g_fifo_len;
 static double g_rs_pos;
 static float g_rs_prev[2];
 
+/* Wall-clock diagnostics only. These do not change pacing or retries. */
+typedef struct {
+    long calls;
+    long total_ms;
+    long max_ms;
+} stage_time;
+
+static void stage_record(stage_time *stage, long elapsed_ms)
+{
+    if (elapsed_ms < 0) elapsed_ms = 0; /* wall clock adjusted */
+    stage->calls++;
+    stage->total_ms += elapsed_ms;
+    if (elapsed_ms > stage->max_ms) stage->max_ms = elapsed_ms;
+}
+
+static int capture_read_timed(float *buf, size_t size, stage_time *stage)
+{
+    long before = now_ms();
+    int result = capture_read(buf, size);
+    stage_record(stage, now_ms() - before);
+    return result;
+}
+
 /* ---- AVDTP signaling --------------------------------------------------- */
 
 static void on_signal_frame(unsigned cid, const unsigned char *d, int len)
 {
-    (void)cid;
+    /* Header-only diagnostics, bounded per process; never log audio/key bytes. */
+    g_av_rx_count++;
+    if (g_av_rx_count <= 64) {
+        if (len < 2) log_line("avdtp rx: cid=%#04x short frame len=%d", cid, len);
+        else log_line("avdtp rx: cid=%#04x len=%d label=%u packet=%u type=%u "
+                      "signal=%#04x expected-label=%u expected-signal=%#04x",
+                      cid, len, d[0] >> 4, (d[0] >> 2) & 3, d[0] & 3,
+                      d[1] & 0x3F, g_av_label, g_av_expected_signal);
+    } else if (g_av_rx_count == 65) log_line("avdtp rx: trace limit reached");
     if (len < 2) return;
-    if ((d[0] >> 2) & 3) return;            /* fragmented: not used by sinks */
+    if ((d[0] >> 2) & 3) return;            /* fragmented packets unsupported */
 
     if ((d[0] & 3) == 0) {
-        /* A command from the headset: this source takes the lead and
-         * supports none. */
-        unsigned char rej[3];
-        rej[0] = (unsigned char)((d[0] & 0xF0) | 0x03);
-        rej[1] = d[1] & 0x3F;
-        rej[2] = 0x19;                      /* NOT_SUPPORTED_COMMAND */
-        bt_send(g_sig.dcid, rej, 3);
+        /* A peer may open signaling and discover our source while we remain
+         * the initiator of codec configuration. Do not alter a pending reply. */
+        unsigned char reply[16]={0};
+        unsigned signal=d[1]&0x3f;
+        int bytes=3,error=0x19; /* Unsupported state-changing command. */
+        reply[0]=(unsigned char)((d[0]&0xf0)|3);reply[1]=(unsigned char)signal;
+        if (signal==AVDTP_DISCOVER) {
+            if (len!=2) error=0x11;
+            else {
+                reply[0]=(unsigned char)((d[0]&0xf0)|2);
+                reply[2]=(unsigned char)((OUR_SEID<<2)|(g_source_in_use?2:0));
+                reply[3]=0;bytes=4;error=0; /* Audio source SEP. */
+            }
+        } else if (signal==AVDTP_GET_CAPABILITIES || signal==AVDTP_GET_ALL_CAPABILITIES) {
+            if (len!=3) error=0x11;
+            else if (d[2]!=(OUR_SEID<<2)) error=0x12;
+            else {
+                const unsigned char capabilities[]={1,0,7,6,0,0,0x33,0x15,2,MAX_BITPOOL};
+                reply[0]=(unsigned char)((d[0]&0xf0)|2);
+                memcpy(reply+2,capabilities,sizeof capabilities);
+                bytes=2+(int)sizeof capabilities;error=0;
+            }
+        }
+        if (error) reply[2]=(unsigned char)error;
+        if (!bt_send(g_sig.dcid,reply,bytes))
+            log_line("avdtp: incoming command reply submission failed signal=%#04x",signal);
         return;
     }
-    if ((d[0] >> 4) == g_av_label) {
+    if ((d[0] >> 4) == g_av_label && (d[1]&0x3f)==g_av_expected_signal) {
         g_av_len = len < (int)sizeof g_av_rsp ? len : (int)sizeof g_av_rsp;
         memcpy(g_av_rsp, d, (size_t)g_av_len);
         g_av_ready = 1;
@@ -93,14 +150,37 @@ static void on_media_frame(unsigned cid, const unsigned char *d, int len)
     (void)cid; (void)d; (void)len;          /* a sink sends nothing here */
 }
 
-/* Sends an AVDTP command and waits for its response. Returns the message
- * type (2 accept, 3 reject) or -1 if none came. A response can go to the
- * system's driver, so the command is asked again with a new label. */
+/* Reset only after the caller established the observed-disconnect boundary.
+ * Distinct dynamic CIDs avoid reusing the prior local audio endpoints. */
+int a2dp_prepare_reconnect(void)
+{
+    static int used;
+    if(used || !bt_reconnect_prepared())return 0;
+    used=1;
+    g_sig=(l2cap_chan){.name="signaling",.scid=SIG_CID+4,.remote_mtu=672};
+    g_media=(l2cap_chan){.name="media",.scid=MEDIA_CID+4,.remote_mtu=672};
+    g_av_ready=g_av_len=g_av_expected_signal=g_sink_seid=g_source_in_use=0;
+    memset(g_av_rsp,0,sizeof g_av_rsp);memset(g_sink_sbc,0,sizeof g_sink_sbc);
+    memset(&g_sc,0,sizeof g_sc);
+    g_fifo_len=0;g_rs_pos=0;memset(g_rs_prev,0,sizeof g_rs_prev);
+    return bt_listen_channel(&g_sig,PSM_AVDTP,on_signal_frame);
+}
+
+int a2dp_prepare(void)
+{
+    return bt_listen_channel(&g_sig,PSM_AVDTP,on_signal_frame);
+}
+
+/* Sends an AVDTP command with the existing bounded waits/retries. Returns
+ * 2 accept, 3 reject, or -1 if none came. Missing replies alone do not
+ * establish whether another reader consumed a response. */
 static int avdtp_cmd(unsigned char signal, const unsigned char *params, int plen)
 {
     unsigned char p[64];
     int attempt;
+    unsigned received_before;
 
+    g_av_expected_signal = signal;
     for (attempt = 1; ; attempt++) {
         g_av_label = (unsigned char)((g_av_label + 1) & 0x0F);
         p[0] = (unsigned char)(g_av_label << 4);    /* single packet, command */
@@ -108,8 +188,21 @@ static int avdtp_cmd(unsigned char signal, const unsigned char *params, int plen
         if (plen > 0) memcpy(p + 2, params, (size_t)plen);
 
         g_av_ready = 0;
-        if (!bt_send(g_sig.dcid, p, 2 + plen)) return -1;
-        if (bt_wait(&g_av_ready, 2000)) break;
+        received_before = g_av_rx_count;
+        int wait_ms=signal==AVDTP_DISCOVER && attempt==1 ? DISCOVER_FIRST_WAIT_MS : 2000;
+        log_line("avdtp tx: signal=%#04x label=%u attempt=%d cid=%#04x bytes=%d wait-ms=%d",
+                 signal, g_av_label, attempt, g_sig.dcid, 2 + plen,wait_ms);
+        if (!bt_send(g_sig.dcid, p, 2 + plen)) {
+            log_line("avdtp tx: submission failed");
+            return -1;
+        }
+        if (bt_wait(&g_av_ready, wait_ms)) {
+            log_line("avdtp reply: type=%u signal=%#04x bytes=%d",
+                     g_av_rsp[0] & 3, g_av_rsp[1] & 0x3F, g_av_len);
+            break;
+        }
+        log_line("avdtp wait: no accepted reply; received-frames=%u link-lost=%d",
+                 g_av_rx_count - received_before, bt_link_lost());
         if (attempt == 3 || bt_link_lost()) {
             log_line("avdtp: signal %#04x unanswered", signal);
             return -1;
@@ -210,11 +303,16 @@ static int configure_stream(const sbc_choice *sc)
         log_line("avdtp: configuration refused");
         return 0;
     }
+    g_source_in_use=1;
     if (avdtp_cmd(AVDTP_OPEN, &s, 1) != 2) {
         log_line("avdtp: open refused");
         return 0;
     }
     if (!bt_open_channel(&g_media, PSM_AVDTP, on_media_frame)) return 0;
+    if (!bt_require_active()) {
+        log_line("avdtp: active-mode check failed; audio start skipped");
+        return 0;
+    }
     if (avdtp_cmd(AVDTP_START, &s, 1) != 2) {
         log_line("avdtp: start refused");
         return 0;
@@ -225,6 +323,14 @@ static int configure_stream(const sbc_choice *sc)
 
 int a2dp_start(void)
 {
+    /* Discovery also needs a responsive link. Check the confirmed encrypted
+     * headset before opening signaling; the existing pre-START check remains
+     * in case its mode changes during negotiation. */
+    log_line("avdtp: checking active mode before signaling and discovery");
+    if (!bt_require_active()) {
+        log_line("avdtp: active-mode check failed; signaling and discovery skipped");
+        return 0;
+    }
     return bt_open_channel(&g_sig, PSM_AVDTP, on_signal_frame) &&
            find_sbc_sink() && choose_sbc(&g_sc) && configure_stream(&g_sc);
 }
@@ -305,7 +411,7 @@ static int frames_that_fit(size_t framelen)
 
 /* ---- the stream -------------------------------------------------------- */
 
-int a2dp_stream(int capturing)
+static int stream_loop(int capturing, int limit_ms)
 {
     static float rec[CAPTURE_RECORD / sizeof(float)];
     const sbc_choice *sc = &g_sc;
@@ -317,6 +423,8 @@ int a2dp_stream(int capturing)
     long retry_at = 0, silence_t0 = 0, silent = 0;
     long max_lag = (long)sc->rate * MAX_LAG_MS / 1000;
     long keep_lag = (long)sc->rate * KEEP_LAG_MS / 1000;
+    stage_time read_time = {0}, queue_time = {0}, encode_time = {0};
+    stage_time send_time = {0}, poll_time = {0};
     uint16_t seq = 1;
     unsigned char pkt[MEDIA_PACKET_BYTES];
 
@@ -345,17 +453,30 @@ int a2dp_stream(int capturing)
     log_line("sbc: %zu-byte frames, %d per packet (%d ms)", framelen,
              frames_per_pkt, pkt_frames * 1000 / sc->rate);
 
-    notify("FGG-PlayPods: audio on the headset - switch it off to stop");
+    notify("PlayPods resident comparison: audio on; one headset reconnect available");
     t0 = last_status = now_ms();
     if (!capturing) silence_t0 = retry_at = t0;     /* nothing to capture yet */
+    if (limit_ms)
+        log_line("stream comparison: userland limit=%d ms; native calls are not interruptible",limit_ms);
 
     /* Runs until the headset goes away: switching it off ends the session. */
     while (!bt_link_lost() && !g_media.closed) {
         int n = 0, sent_one = 0;
+        if (limit_ms && now_ms()-t0>=limit_ms) goto duration_done;
 
-        /* Everything the capture has ready. */
-        while (capturing && (n = capture_read(rec, sizeof rec)) > 0) {
+        /* A continuously ready capture must yield to encoding and HCI polling.
+         * Four native records are below MAX_LAG_MS; ordinary empty-queue reads
+         * retain the same behavior. Native calls remain noninterruptible. */
+        for (int drained=0;capturing && drained<CAPTURE_DRAIN_RECORDS;drained++) {
+            if (bt_link_lost() || g_media.closed) goto done;
+            if (limit_ms && now_ms()-t0>=limit_ms) goto duration_done;
+            n=capture_read_timed(rec,sizeof rec,&read_time);
+            if (bt_link_lost() || g_media.closed) goto done;
+            if (limit_ms && now_ms()-t0>=limit_ms) goto duration_done;
+            if (n<=0) break;
+            long before = now_ms();
             queue_capture(rec, n / (int)(sizeof(float) * CAPTURE_CHANNELS), sc->rate);
+            stage_record(&queue_time, now_ms() - before);
             records++;
         }
         if (capturing && n < 0) {
@@ -389,6 +510,7 @@ int a2dp_stream(int capturing)
         }
 
         while (g_fifo_len >= pkt_frames && bt_can_send()) {
+            if (limit_ms && now_ms()-t0>=limit_ms) goto duration_done;
             unsigned char *out = pkt + RTP_HEADER;
             int f;
 
@@ -399,7 +521,9 @@ int a2dp_stream(int capturing)
             put32be(pkt + 8, 1);                /* SSRC */
             pkt[12] = (unsigned char)frames_per_pkt;
 
+            long encode_before = now_ms();
             for (f = 0; f < frames_per_pkt; f++) {
+                if (limit_ms && now_ms()-t0>=limit_ms) goto duration_done;
                 ssize_t written = 0;
                 ssize_t used = sbc_encode(&sbc, g_fifo + f * samples_per_frame * 2,
                                           codesize, out, framelen, &written);
@@ -410,9 +534,14 @@ int a2dp_stream(int capturing)
                 }
                 out += written;
             }
+            stage_record(&encode_time, now_ms() - encode_before);
             fifo_take(pkt_frames);
 
-            if (!bt_send(g_media.dcid, pkt, (int)(out - pkt))) {
+            if (limit_ms && now_ms()-t0>=limit_ms) goto duration_done;
+            long send_before = now_ms();
+            int sent = bt_send(g_media.dcid, pkt, (int)(out - pkt));
+            stage_record(&send_time, now_ms() - send_before);
+            if (!sent) {
                 log_line("media: send failed after %d packets", pkts);
                 goto done;
             }
@@ -424,19 +553,55 @@ int a2dp_stream(int capturing)
         if (now_ms() - last_status >= STATUS_MS) {
             log_line("stream: %d packets, %d capture records, queue %d ms, "
                      "trimmed %ld, overruns %ld, restarts %d, %s, credits %d, "
-                     "completions assumed %ld, reports missing %ld", pkts, records,
+                     "local submissions awaiting observed completion %ld", pkts, records,
                      g_fifo_len * 1000 / sc->rate, trimmed, capture_overruns(),
                      restarts, capturing ? "capturing" : "waiting for audio",
-                     bt_credits(), bt_completions_assumed(), bt_reports_missing());
+                     bt_credits(), bt_reports_missing());
+            bt_completion_report();
+            hci_receive_report();
+            log_line("timing: read %ld calls %ld ms total %ld max; "
+                     "queue %ld calls %ld ms total %ld max; "
+                     "encode %ld calls %ld ms total %ld max; "
+                     "send %ld calls %ld ms total %ld max; "
+                     "poll %ld calls %ld ms total %ld max",
+                     read_time.calls, read_time.total_ms, read_time.max_ms,
+                     queue_time.calls, queue_time.total_ms, queue_time.max_ms,
+                     encode_time.calls, encode_time.total_ms, encode_time.max_ms,
+                     send_time.calls, send_time.total_ms, send_time.max_ms,
+                     poll_time.calls, poll_time.total_ms, poll_time.max_ms);
+            memset(&read_time, 0, sizeof read_time);
+            memset(&queue_time, 0, sizeof queue_time);
+            memset(&encode_time, 0, sizeof encode_time);
+            memset(&send_time, 0, sizeof send_time);
+            memset(&poll_time, 0, sizeof poll_time);
             last_status = now_ms();
         }
 
+        long poll_before = now_ms();
         bt_poll(sent_one ? 1 : 3);
+        stage_record(&poll_time, now_ms() - poll_before);
     }
 
+    goto done;
+duration_done:
+    log_line("stream comparison: duration reached; stopping normally, no automatic restart");
 done:
+    if (limit_ms)
+        log_line("stream comparison: elapsed=%ld ms limit=%d credits=%d awaiting-observed=%ld",
+                 now_ms()-t0,limit_ms,bt_credits(),bt_reports_missing());
     log_line("stream: ended after %ld s, %d packets, %d capture records, "
              "trimmed %ld", (now_ms() - t0) / 1000, pkts, records, trimmed);
     sbc_finish(&sbc);
     return pkts > 0;
+}
+
+int a2dp_stream(int capturing) { return stream_loop(capturing,0); }
+
+int a2dp_stream_bounded(int capturing,int limit_ms)
+{
+    if (limit_ms<1 || limit_ms>600000) {
+        log_line("stream comparison: invalid limit=%d; not started",limit_ms);
+        return 0;
+    }
+    return stream_loop(capturing,limit_ms);
 }

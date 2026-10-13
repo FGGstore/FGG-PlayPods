@@ -1,0 +1,65 @@
+{
+  "schema": 1,
+  "profile": "1.0-local-residentwaitb1",
+  "purpose": "Sanitized evidence summary; raw logs remain private",
+  "console_firmware": "12.40",
+  "headset": "Jabra Evolve2 75",
+  "headset_firmware": "Owner reports latest; exact version unknown",
+  "input": "Wireless DualSense during initial clear-sound confirmation",
+  "settings": {
+    "hci_out_wait_rearm": 0,
+    "stream_limit_ms": 0,
+    "producer_assumed_reuse_ms": 60,
+    "reconnect_limit": 1,
+    "passive_wait_ms": 30000
+  },
+  "owner_observations": {
+    "milestone": "Works pretty well; owner requests freeze and contribution preparation",
+    "first_stream": "Clear sound; wireless input works",
+    "reconnect": "Headset intentionally off/on; reconnect worked",
+    "second_disconnect": "Headset intentionally switched off again",
+    "startup": "Sequence-dependent, improved but still clunky"
+  },
+  "logged_cycle": {
+    "controller_opens": 1,
+    "stream_seconds": [
+      69,
+      30
+    ],
+    "stream_packets": [
+      3740,
+      1653
+    ],
+    "new_event_after_disconnect_seconds": 9,
+    "audio_resume_after_disconnect_seconds": 13,
+    "adjacent_packet_rates_per_second": [
+      53.4,
+      53.8
+    ],
+    "first_stream_usb_wait_max_ms": 1,
+    "second_stream_early_usb_wait_max_ms": 31,
+    "second_stream_later_usb_wait_max_ms": 1,
+    "capture_overruns_per_session": 1,
+    "retired_unreported_submissions": 78,
+    "final_submissions": 5522,
+    "final_observed_completions": 5409,
+    "final_live_missing_reports": 35,
+    "assumed_reuse": 128
+  },
+  "later_startup_failure": {
+    "result": "Existing-link status with no verified owned handle",
+    "fresh_event_window_ms": 10000,
+    "acl_submissions": 0,
+    "blind_disconnect": false,
+    "audio_started": false
+  },
+  "limitations": [
+    "One completed B1 reconnect cycle, not a reliability study",
+    "Exact menu/game workload unspecified",
+    "Post-reconnect fidelity and wireless input not separately reconfirmed",
+    "Long gameplay, repeated startup and native restoration not established",
+    "Timer-based reuse does not prove physical buffer availability",
+    "Normalized RFC binary not hardware-tested"
+  ],
+  "working_artifact_sha256": "1113b53a0901d1a285cf4430add9299af276df91754c55924d8466fe7fbf1466"
+}

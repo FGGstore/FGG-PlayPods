@@ -16,6 +16,8 @@ void log_line(const char *fmt, ...) { (void)fmt; }
 void notify(const char *fmt, ...) { (void)fmt; }
 int hci_open(void) { return 0; }
 void hci_close(void) {}
+int hci_output_idle(void) { return 1; }
+void hci_receive_report(void) {}
 int hci_cmd(unsigned op, const void *p, int n)
 {
     (void)p; (void)n; commands++;
@@ -101,7 +103,8 @@ static void test_truncated(void)
 static void test_ownership_and_valid_acl(void)
 {
     unsigned char packet[] = {0x21,0x20,5,0,1,0,0x40,0,42};
-    l2cap_chan ch = {"test",0x40,0x41,1,0,0,0,0,672};
+    l2cap_chan ch = {.name="test", .scid=0x40, .dcid=0x41,
+                     .conn_done=1, .remote_mtu=672};
     g_nchans = 1; g_chans[0] = &ch; g_frame_fns[0] = received_frame;
     g_conn_done = 0;
     on_acl(packet, sizeof packet);
@@ -119,7 +122,8 @@ static void test_ownership_and_valid_acl(void)
 
 static void test_configuration(void)
 {
-    l2cap_chan ch = {"test",0x40,0x41,1,0,0,0,0,672};
+    l2cap_chan ch = {.name="test", .scid=0x40, .dcid=0x41,
+                     .conn_done=1, .remote_mtu=672};
     unsigned char bad[] = {4,7,6,0,0x40,0,0,0,1,2};
     unsigned char good[] = {4,7,8,0,0x40,0,0,0,1,2,0,2};
     g_nchans = 1; g_chans[0] = &ch;

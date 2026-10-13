@@ -1,0 +1,52 @@
+{
+  "src/a2dp.o": {
+    "matches_working_b1": true,
+    "sha256": "d3285f44c7b6462d650220cfaadc420482c8082162f19c0800c4535d6281dd48"
+  },
+  "src/bt.o": {
+    "matches_working_b1": false,
+    "sha256": "5a146471b3f32aad5936fe807649a519e11cea1cba1d0b628c3f4b1dc4f38b85",
+    "differing_sections": [
+      ".strtab",
+      ".symtab"
+    ],
+    "explanation": "Only the resolved STT_FILE symbol changes from bt-timed.c to bt.c; all other section payloads and resolved symbols match."
+  },
+  "src/capture.o": {
+    "matches_working_b1": true,
+    "sha256": "8e72ff841eb9726cf468088021cb4961904e0a32824b277435df1a7071973cfb"
+  },
+  "src/hci.o": {
+    "matches_working_b1": true,
+    "sha256": "1edc233e06bc71500e250f4545e91cd72238089c8326e1657250e27c3a149adf"
+  },
+  "src/log.o": {
+    "matches_working_b1": true,
+    "sha256": "5938c95f77a36eb885acd73414e7c83aabcacf6fa07f2b35a443a909ede4ce45"
+  },
+  "src/main.o": {
+    "matches_working_b1": false,
+    "sha256": "b68f015d8b336e003c8a4abebebc26503fe37f147be6f48b5258036d9e1270b1",
+    "differing_sections": [
+      ".rodata.str1.1",
+      ".symtab"
+    ],
+    "explanation": "RFC identifying version differs; normalized binary was not hardware-tested."
+  },
+  "src/sdp.o": {
+    "matches_working_b1": true,
+    "sha256": "42b8ee664c950593b420dc427864eca8d8295d96556d7c5b0ef03b8b13eb07b6"
+  },
+  "src/session_lock.o": {
+    "matches_working_b1": true,
+    "sha256": "869ec539f7b9f4ba18ee64a0bdd60ee438ec0cbe7d8e08ad1670fabc05112d73"
+  },
+  "third_party/sbc/sbc.o": {
+    "matches_working_b1": true,
+    "sha256": "df949e4046965a03c59f4e85215ba5c456f18a610f26995eb4efa33c1be30037"
+  },
+  "third_party/sbc/sbc_primitives.o": {
+    "matches_working_b1": true,
+    "sha256": "bb6af51a8ca37fd9c706d6cf3eedecf7d32520133f88d077c0da5f9c3f17c78d"
+  }
+}

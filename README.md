@@ -1,3 +1,5 @@
+> **Review branch:** this is a resident-audio RFC, not an upstream release. See [scope, tests and hardware limitations](docs/RESIDENT-AUDIO-RFC.md) before relying on the original usage and compatibility claims below.
+
 <p align="center">
   <img src="logo.png" alt="FGG-PlayPods" width="820">
 </p>
